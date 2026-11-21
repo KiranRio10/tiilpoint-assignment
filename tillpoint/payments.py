@@ -19,13 +19,24 @@ class Payments:
             raise PaymentError(f"payment for unknown order {event['order_id']}")
         if order["status"] == "cancelled":
             raise PaymentError(f"order {order['id']} is cancelled")
+        # Idempotency: ignore retries of the same event from the payment provider.
+        existing = self.conn.execute(
+            "SELECT 1 FROM payments WHERE event_id = ?", (event["id"],)
+        ).fetchone()
+        if existing is not None:
+            return order["status"]
         self.conn.execute(
             "INSERT INTO payments (order_id, event_id, amount_cents, received_at) VALUES (?, ?, ?, ?)",
             (order["id"], event["id"], event["amount_cents"], db.to_iso(now or db.utcnow())),
         )
-        if order["status"] == "pending" and self.paid_cents(order["id"]) >= order["total_cents"]:
+        paid = self.paid_cents(order["id"])
+        if order["status"] == "pending" and paid >= order["total_cents"]:
             self.conn.execute("UPDATE orders SET status = 'paid' WHERE id = ?", (order["id"],))
             return "paid"
+        # Overpayment: a genuinely distinct second payment pushed the total above what the order costs.
+        if paid > order["total_cents"] and order["status"] in ("paid", "shipped"):
+            self.conn.execute("UPDATE orders SET status = 'overpaid' WHERE id = ?", (order["id"],))
+            return "overpaid"
         return order["status"]
 
     def paid_cents(self, order_id):
