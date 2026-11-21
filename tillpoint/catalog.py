@@ -52,10 +52,14 @@ class Catalog:
 
     def reserve(self, sku, qty):
         """Take qty units out of stock, or raise OutOfStock."""
-        product = self.get_product(sku)
-        if product.stock < qty:
+        # Atomic check-and-decrement to avoid TOCTOU race with multiple workers.
+        cur = self.conn.execute(
+            "UPDATE products SET stock = stock - ? WHERE sku = ? AND stock >= ?", (qty, sku, qty)
+        )
+        if cur.rowcount == 0:
+            # Either the product doesn't exist or stock is insufficient.
+            product = self.get_product(sku)  # raises UnknownProduct if missing
             raise OutOfStock(sku, qty, product.stock)
-        self.conn.execute("UPDATE products SET stock = stock - ? WHERE sku = ?", (qty, sku))
         self._cache.pop(sku, None)
 
     def release(self, sku, qty):
